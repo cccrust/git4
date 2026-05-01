@@ -97,6 +97,10 @@ enum Commands {
     LsRemote {
         remote: String,
     },
+    /// Unpack objects from a pack archive
+    UnpackObjects {
+        packfile: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -168,6 +172,9 @@ fn main() -> Result<()> {
         }
         Commands::LsRemote { remote } => {
             ls_remote(&remote)?;
+        }
+        Commands::UnpackObjects { packfile } => {
+            unpack_objects(&packfile)?;
         }
     }
 
@@ -1060,6 +1067,122 @@ fn ls_remote(remote: &str) -> Result<()> {
         
         pos += len;
     }
+    
+    Ok(())
+}
+
+fn unpack_objects(packfile: &str) -> Result<()> {
+    use std::io::Write;
+    let pack_data = fs::read(packfile)?;
+    if pack_data.len() < 32 {
+        return Err(anyhow!("Packfile is too small"));
+    }
+    
+    if &pack_data[0..4] != b"PACK" {
+        return Err(anyhow!("Invalid packfile magic"));
+    }
+    
+    let version = u32::from_be_bytes(pack_data[4..8].try_into().unwrap());
+    if version != 2 {
+        return Err(anyhow!("Unsupported pack version: {}", version));
+    }
+    
+    let num_objects = u32::from_be_bytes(pack_data[8..12].try_into().unwrap());
+    println!("Unpacking {} objects...", num_objects);
+    
+    let mut pos = 12;
+    let mut resolved_count = 0;
+    let mut delta_count = 0;
+    
+    for _ in 0..num_objects {
+        let mut byte = pack_data[pos];
+        let obj_type = (byte >> 4) & 0b111;
+        let mut size = (byte & 0b1111) as usize;
+        let mut shift = 4;
+        
+        pos += 1;
+        while (byte & 0x80) != 0 {
+            byte = pack_data[pos];
+            size |= ((byte & 0x7F) as usize) << shift;
+            shift += 7;
+            pos += 1;
+        }
+        
+        if obj_type == 6 {
+            byte = pack_data[pos];
+            pos += 1;
+            let mut offset = (byte & 0x7F) as usize;
+            while (byte & 0x80) != 0 {
+                offset += 1;
+                byte = pack_data[pos];
+                pos += 1;
+                offset = (offset << 7) | ((byte & 0x7F) as usize);
+            }
+            let mut decompress = flate2::Decompress::new(true);
+            let mut output = vec![0; 4096];
+            while let Ok(res) = decompress.decompress(&pack_data[pos..], &mut output, flate2::FlushDecompress::None) {
+                if res == flate2::Status::StreamEnd || res == flate2::Status::BufError { break; }
+            }
+            pos += decompress.total_in() as usize;
+            delta_count += 1;
+            continue;
+        } else if obj_type == 7 {
+            pos += 20;
+            let mut decompress = flate2::Decompress::new(true);
+            let mut output = vec![0; 4096];
+            while let Ok(res) = decompress.decompress(&pack_data[pos..], &mut output, flate2::FlushDecompress::None) {
+                if res == flate2::Status::StreamEnd || res == flate2::Status::BufError { break; }
+            }
+            pos += decompress.total_in() as usize;
+            delta_count += 1;
+            continue;
+        }
+        
+        let type_str = match obj_type {
+            1 => "commit",
+            2 => "tree",
+            3 => "blob",
+            4 => "tag",
+            _ => return Err(anyhow!("Unknown object type {}", obj_type)),
+        };
+        
+        let mut decompress = flate2::Decompress::new(true);
+        let mut output = vec![0; size];
+        if size > 0 {
+            let res = decompress.decompress(&pack_data[pos..], &mut output, flate2::FlushDecompress::None)
+                .map_err(|e| anyhow!("Decompression failed: {:?}", e))?;
+            
+            if res != flate2::Status::StreamEnd && res != flate2::Status::BufError {
+                println!("Warning: Unexpected decompress status for object, might be corrupted");
+            }
+        } else {
+            let _ = decompress.decompress(&pack_data[pos..], &mut output, flate2::FlushDecompress::None);
+        }
+        
+        pos += decompress.total_in() as usize;
+        
+        let header = format!("{} {}\0", type_str, size);
+        let mut full_data = header.into_bytes();
+        full_data.extend_from_slice(&output);
+        
+        let mut hasher = sha1::Sha1::new();
+        sha1::Digest::update(&mut hasher, &full_data);
+        let hash = hex::encode(sha1::Digest::finalize(hasher));
+        
+        let dir = git4_dir()?;
+        let obj_dir = dir.join("objects").join(&hash[0..2]);
+        fs::create_dir_all(&obj_dir)?;
+        
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&full_data)?;
+        let compressed = encoder.finish()?;
+        
+        fs::write(obj_dir.join(&hash[2..]), compressed)?;
+        
+        resolved_count += 1;
+    }
+    
+    println!("Unpacked {} loose objects. Encountered {} unresolved deltas.", resolved_count, delta_count);
     
     Ok(())
 }
