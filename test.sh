@@ -75,6 +75,16 @@ echo "=> 切換回 main 分支..."
 $GIT4 checkout main
 $GIT4 branch
 
+# 8. 測試 status
+echo "=> [8/8] 測試 status 功能..."
+$GIT4 status
+echo "Modified feature content" > feature.txt
+echo "=> 修改了 feature.txt，檢視 status..."
+$GIT4 status
+$GIT4 add feature.txt
+echo "=> 加入 feature.txt 後，檢視 status..."
+$GIT4 status
+
 # 結束與清理
 echo "=================================="
 echo "    所有測試皆順利完成！🎉     "

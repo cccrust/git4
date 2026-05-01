@@ -63,6 +63,8 @@ enum Commands {
     Checkout {
         name: String,
     },
+    /// Show working tree status
+    Status,
 }
 
 fn main() -> Result<()> {
@@ -106,6 +108,9 @@ fn main() -> Result<()> {
         }
         Commands::Checkout { name } => {
             checkout(&name)?;
+        }
+        Commands::Status => {
+            status()?;
         }
     }
 
@@ -530,5 +535,176 @@ fn checkout(name: &str) -> Result<()> {
         fs::write(head_path, format!("{}\n", hash))?;
         println!("Note: checking out '{}'. You are in 'detached HEAD' state.", name);
     }
+    Ok(())
+}
+
+fn get_head_tree() -> Result<Option<String>> {
+    let head = get_head()?;
+    if let Some(hash) = head {
+        let (obj_type, content) = read_object(&hash)?;
+        if obj_type == "commit" {
+            let content_str = String::from_utf8_lossy(&content);
+            for line in content_str.lines() {
+                if let Some(t) = line.strip_prefix("tree ") {
+                    return Ok(Some(t.to_string()));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn read_tree_recursive(hash: &str, base_path: &Path, files: &mut BTreeMap<String, String>) -> Result<()> {
+    let (obj_type, content) = read_object(hash)?;
+    if obj_type != "tree" {
+        return Ok(());
+    }
+    let mut i = 0;
+    while i < content.len() {
+        let space_pos = i + content[i..].iter().position(|&b| b == b' ').unwrap_or(0);
+        let mode_str = String::from_utf8_lossy(&content[i..space_pos]);
+        let nul_pos = space_pos + content[space_pos..].iter().position(|&b| b == 0).unwrap_or(0);
+        let name_str = String::from_utf8_lossy(&content[space_pos+1..nul_pos]);
+        let sha = hex::encode(&content[nul_pos+1..nul_pos+21]);
+        
+        let mut path = base_path.to_path_buf();
+        if base_path.as_os_str().is_empty() {
+             path = PathBuf::from(name_str.as_ref());
+        } else {
+             path.push(name_str.as_ref());
+        }
+        
+        if mode_str == "40000" {
+            read_tree_recursive(&sha, &path, files)?;
+        } else {
+            files.insert(path.to_str().unwrap().to_string(), sha);
+        }
+        
+        i = nul_pos + 21;
+    }
+    Ok(())
+}
+
+fn read_index() -> Result<BTreeMap<String, String>> {
+    let dir = git4_dir()?;
+    let index_path = dir.join("index");
+    let mut index = BTreeMap::new();
+    if index_path.exists() {
+        let content = fs::read_to_string(&index_path)?;
+        for line in content.lines() {
+            if let Some((hash, path)) = line.split_once(' ') {
+                index.insert(path.to_string(), hash.to_string());
+            }
+        }
+    }
+    Ok(index)
+}
+
+fn get_workspace_files(path: &Path, base: &Path, map: &mut BTreeMap<String, String>) -> Result<()> {
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let name = entry.file_name().into_string().unwrap_or_default();
+        if name == ".git4" || name == "target" || name.starts_with('.') || name == "git.sh" {
+            continue;
+        }
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            get_workspace_files(&entry.path(), base, map)?;
+        } else if file_type.is_file() {
+            let relative = entry.path().strip_prefix(base).unwrap().to_path_buf();
+            let relative_str = relative.to_str().unwrap().to_string();
+            let hash = hash_object(entry.path().to_str().unwrap(), false)?;
+            map.insert(relative_str, hash);
+        }
+    }
+    Ok(())
+}
+
+fn status() -> Result<()> {
+    let mut head_files = BTreeMap::new();
+    if let Some(tree_hash) = get_head_tree()? {
+        read_tree_recursive(&tree_hash, Path::new(""), &mut head_files)?;
+    }
+    
+    let index_files = read_index()?;
+    let mut workspace_files = BTreeMap::new();
+    let current_dir = std::env::current_dir()?;
+    get_workspace_files(&current_dir, &current_dir, &mut workspace_files)?;
+
+    let mut to_commit = Vec::new();
+    for (path, hash) in &index_files {
+        if let Some(head_hash) = head_files.get(path) {
+            if hash != head_hash {
+                to_commit.push(format!("modified:   {}", path));
+            }
+        } else {
+            to_commit.push(format!("new file:   {}", path));
+        }
+    }
+    for path in head_files.keys() {
+        if !index_files.contains_key(path) {
+            to_commit.push(format!("deleted:    {}", path));
+        }
+    }
+
+    let mut not_staged = Vec::new();
+    let mut untracked = Vec::new();
+    for (path, hash) in &workspace_files {
+        if let Some(index_hash) = index_files.get(path) {
+            if hash != index_hash {
+                not_staged.push(format!("modified:   {}", path));
+            }
+        } else if let Some(head_hash) = head_files.get(path) {
+            if hash != head_hash {
+                not_staged.push(format!("modified:   {}", path));
+            }
+        } else {
+            untracked.push(path.clone());
+        }
+    }
+    
+    for path in index_files.keys().chain(head_files.keys()) {
+        if !workspace_files.contains_key(path) {
+            let d = format!("deleted:    {}", path);
+            if !not_staged.contains(&d) {
+                 not_staged.push(d);
+            }
+        }
+    }
+
+    to_commit.sort(); to_commit.dedup();
+    not_staged.sort(); not_staged.dedup();
+    untracked.sort(); untracked.dedup();
+    
+    let dir = git4_dir()?;
+    let head_path = dir.join("HEAD");
+    let head_content = fs::read_to_string(head_path).unwrap_or_default();
+    let branch = head_content.strip_prefix("ref: refs/heads/").unwrap_or("").trim();
+    if !branch.is_empty() {
+        println!("On branch {}", branch);
+    } else {
+        println!("Not currently on any branch.");
+    }
+    
+    if !to_commit.is_empty() {
+        println!("Changes to be committed:");
+        for l in &to_commit { println!("  {}", l); }
+        println!();
+    }
+    if !not_staged.is_empty() {
+        println!("Changes not staged for commit:");
+        for l in &not_staged { println!("  {}", l); }
+        println!();
+    }
+    if !untracked.is_empty() {
+        println!("Untracked files:");
+        for l in &untracked { println!("  {}", l); }
+        println!();
+    }
+    
+    if to_commit.is_empty() && not_staged.is_empty() && untracked.is_empty() {
+        println!("nothing to commit, working tree clean");
+    }
+    
     Ok(())
 }
