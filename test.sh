@@ -117,6 +117,12 @@ $GIT4 log
 echo "=> 在 test_repo 測試從 remote_repo 拉取 fetch..."
 $GIT4 fetch ../remote_repo
 
+# 11. 測試 remote 與 ls-remote (HTTP)
+echo "=> [11/11] 測試 remote add 與 ls-remote..."
+$GIT4 remote add origin https://github.com/cccrust/git4.git
+echo "=> 取得 GitHub 上 git4 專案的分支資訊 (ls-remote)..."
+$GIT4 ls-remote origin | head -n 5
+
 # 結束與清理
 echo "=================================="
 echo "    所有測試皆順利完成！🎉     "

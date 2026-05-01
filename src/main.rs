@@ -87,6 +87,16 @@ enum Commands {
     Fetch {
         remote_path: String,
     },
+    /// Manage set of tracked repositories
+    Remote {
+        action: String,
+        name: String,
+        url: String,
+    },
+    /// List references in a remote repository
+    LsRemote {
+        remote: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -148,6 +158,16 @@ fn main() -> Result<()> {
         }
         Commands::Fetch { remote_path } => {
             fetch(&remote_path)?;
+        }
+        Commands::Remote { action, name, url } => {
+            if action == "add" {
+                remote_add(&name, &url)?;
+            } else {
+                println!("Unknown remote action: {}", action);
+            }
+        }
+        Commands::LsRemote { remote } => {
+            ls_remote(&remote)?;
         }
     }
 
@@ -959,5 +979,87 @@ fn fetch(remote_path: &str) -> Result<()> {
     }
     
     println!("Fetched from {}", remote_path);
+    Ok(())
+}
+
+fn remote_add(name: &str, url: &str) -> Result<()> {
+    let dir = git4_dir()?;
+    let config_path = dir.join("config");
+    let mut out = String::new();
+    if config_path.exists() {
+        out = fs::read_to_string(&config_path)?;
+    }
+    out.push_str(&format!("[remote \"{}\"]\n", name));
+    out.push_str(&format!("url = {}\n", url));
+    fs::write(config_path, out)?;
+    Ok(())
+}
+
+fn get_remote_url(name: &str) -> Result<String> {
+    let dir = git4_dir()?;
+    let config_path = dir.join("config");
+    if !config_path.exists() {
+        if name.starts_with("http") { return Ok(name.to_string()); }
+        return Err(anyhow!("No remotes configured"));
+    }
+    let content = fs::read_to_string(config_path)?;
+    let mut in_remote = false;
+    for line in content.lines() {
+        let line = line.trim();
+        if line == format!("[remote \"{}\"]", name) {
+            in_remote = true;
+        } else if line.starts_with('[') {
+            in_remote = false;
+        } else if in_remote && line.starts_with("url = ") {
+            return Ok(line.strip_prefix("url = ").unwrap().trim().to_string());
+        }
+    }
+    if name.starts_with("http") {
+        return Ok(name.to_string());
+    }
+    Err(anyhow!("Remote '{}' not found", name))
+}
+
+fn ls_remote(remote: &str) -> Result<()> {
+    let url = get_remote_url(remote)?;
+    let endpoint = format!("{}/info/refs?service=git-upload-pack", url.trim_end_matches('/'));
+    
+    let resp = ureq::get(&endpoint).call().context("HTTP request failed")?;
+    let mut reader = resp.into_body().into_reader();
+    let mut body = Vec::new();
+    reader.read_to_end(&mut body)?;
+    
+    let mut pos = 0;
+    while pos + 4 <= body.len() {
+        let len_str = std::str::from_utf8(&body[pos..pos+4]).unwrap_or("0000");
+        let len = usize::from_str_radix(len_str, 16).unwrap_or(0);
+        
+        if len == 0 {
+            pos += 4;
+            continue;
+        }
+        
+        if pos + len > body.len() {
+            break;
+        }
+        
+        let line_data = &body[pos+4..pos+len];
+        let line_str = String::from_utf8_lossy(line_data);
+        let line = line_str.trim_end_matches('\n');
+        
+        if line.starts_with('#') {
+            // service declaration
+        } else if line.len() >= 40 {
+            let mut parts = line.split('\0');
+            if let Some(ref_info) = parts.next() {
+                if let Some((hash, refname)) = ref_info.split_once(' ') {
+                    println!("{} {}", hash, refname);
+                }
+            }
+        }
+        
+        pos += len;
+    }
+    
     Ok(())
 }
