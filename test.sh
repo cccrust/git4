@@ -61,6 +61,20 @@ $GIT4 commit -m "Update hello.txt with another line"
 echo "=> [6/6] 測試 log 功能..."
 $GIT4 log
 
+# 7. 測試 branch 與 checkout
+echo "=> [7/7] 測試 branch 與 checkout 功能..."
+$GIT4 branch new-feature
+$GIT4 branch
+$GIT4 checkout new-feature
+echo "Feature content" > feature.txt
+$GIT4 add feature.txt
+$GIT4 commit -m "Commit on new feature branch"
+echo "=> 檢視分支 new-feature 的 log..."
+$GIT4 log
+echo "=> 切換回 main 分支..."
+$GIT4 checkout main
+$GIT4 branch
+
 # 結束與清理
 echo "=================================="
 echo "    所有測試皆順利完成！🎉     "

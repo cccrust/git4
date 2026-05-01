@@ -55,6 +55,14 @@ enum Commands {
     },
     /// Show commit logs
     Log,
+    /// List or create branches
+    Branch {
+        name: Option<String>,
+    },
+    /// Switch branches or restore working tree files
+    Checkout {
+        name: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -92,6 +100,12 @@ fn main() -> Result<()> {
         }
         Commands::Log => {
             log()?;
+        }
+        Commands::Branch { name } => {
+            branch(name)?;
+        }
+        Commands::Checkout { name } => {
+            checkout(&name)?;
         }
     }
 
@@ -404,5 +418,117 @@ fn log() -> Result<()> {
         current = parent_hash;
     }
     
+    Ok(())
+}
+
+fn branch(name: Option<String>) -> Result<()> {
+    let dir = git4_dir()?;
+    let heads_dir = dir.join("refs/heads");
+    
+    if let Some(n) = name {
+        let head_hash = get_head()?.context("No commits yet")?;
+        let branch_path = heads_dir.join(&n);
+        fs::write(branch_path, format!("{}\n", head_hash))?;
+        println!("Created branch {}", n);
+    } else {
+        let head_content = fs::read_to_string(dir.join("HEAD")).unwrap_or_default();
+        let current_branch = head_content.strip_prefix("ref: refs/heads/").unwrap_or("").trim();
+        for entry in fs::read_dir(heads_dir)? {
+            let entry = entry?;
+            let b_name = entry.file_name().into_string().unwrap();
+            if b_name == current_branch {
+                println!("* {}", b_name);
+            } else {
+                println!("  {}", b_name);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn resolve_revision(name: &str) -> Result<String> {
+    let dir = git4_dir()?;
+    let branch_path = dir.join("refs/heads").join(name);
+    if branch_path.exists() {
+        let hash = fs::read_to_string(branch_path)?;
+        return Ok(hash.trim().to_string());
+    }
+    let obj_path = dir.join("objects").join(&name[0..2]).join(&name[2..]);
+    if obj_path.exists() && name.len() >= 40 {
+        return Ok(name.to_string());
+    }
+    Err(anyhow!("Cannot resolve revision: {}", name))
+}
+
+fn restore_tree(hash: &str, target_path: &Path) -> Result<()> {
+    let (obj_type, content) = read_object(hash)?;
+    if obj_type != "tree" {
+        return Err(anyhow!("Expected tree object, got {}", obj_type));
+    }
+    if !target_path.exists() {
+        fs::create_dir_all(target_path)?;
+    }
+    let mut i = 0;
+    while i < content.len() {
+        let space_pos = i + content[i..].iter().position(|&b| b == b' ').unwrap_or(0);
+        let mode_str = String::from_utf8_lossy(&content[i..space_pos]);
+        let nul_pos = space_pos + content[space_pos..].iter().position(|&b| b == 0).unwrap_or(0);
+        let name_str = String::from_utf8_lossy(&content[space_pos+1..nul_pos]);
+        let sha = hex::encode(&content[nul_pos+1..nul_pos+21]);
+        
+        let path = target_path.join(name_str.as_ref());
+        if mode_str == "40000" {
+            restore_tree(&sha, &path)?;
+        } else {
+            let (b_type, b_content) = read_object(&sha)?;
+            if b_type == "blob" {
+                fs::write(&path, b_content)?;
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = fs::metadata(&path)?.permissions();
+                if mode_str == "100755" {
+                    perms.set_mode(0o755);
+                } else {
+                    perms.set_mode(0o644);
+                }
+                fs::set_permissions(&path, perms)?;
+            }
+        }
+        i = nul_pos + 21;
+    }
+    Ok(())
+}
+
+fn checkout(name: &str) -> Result<()> {
+    let hash = resolve_revision(name)?;
+    let (obj_type, content) = read_object(&hash)?;
+    
+    let tree_hash = if obj_type == "commit" {
+        let content_str = String::from_utf8_lossy(&content);
+        let mut tree_hash = String::new();
+        for line in content_str.lines() {
+            if let Some(t) = line.strip_prefix("tree ") {
+                tree_hash = t.to_string();
+                break;
+            }
+        }
+        tree_hash
+    } else if obj_type == "tree" {
+        hash.to_string()
+    } else {
+        return Err(anyhow!("Cannot checkout an object of type {}", obj_type));
+    };
+    
+    restore_tree(&tree_hash, Path::new("."))?;
+    
+    let dir = git4_dir()?;
+    let head_path = dir.join("HEAD");
+    let branch_path = dir.join("refs/heads").join(name);
+    if branch_path.exists() {
+        fs::write(head_path, format!("ref: refs/heads/{}\n", name))?;
+        println!("Switched to branch '{}'", name);
+    } else {
+        fs::write(head_path, format!("{}\n", hash))?;
+        println!("Note: checking out '{}'. You are in 'detached HEAD' state.", name);
+    }
     Ok(())
 }
