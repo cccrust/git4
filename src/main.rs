@@ -65,6 +65,14 @@ enum Commands {
     },
     /// Show working tree status
     Status,
+    /// Show changes between commits, commit and working tree, etc
+    Diff {
+        file: String,
+    },
+    /// Merge two or more development histories together
+    Merge {
+        branch: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -111,6 +119,12 @@ fn main() -> Result<()> {
         }
         Commands::Status => {
             status()?;
+        }
+        Commands::Diff { file } => {
+            diff(&file)?;
+        }
+        Commands::Merge { branch } => {
+            merge(&branch)?;
         }
     }
 
@@ -704,6 +718,123 @@ fn status() -> Result<()> {
     
     if to_commit.is_empty() && not_staged.is_empty() && untracked.is_empty() {
         println!("nothing to commit, working tree clean");
+    }
+    
+    Ok(())
+}
+
+fn diff(file: &str) -> Result<()> {
+    let index_files = read_index()?;
+    let mut base_hash = index_files.get(file).cloned();
+    
+    if base_hash.is_none() {
+        let mut head_files = BTreeMap::new();
+        if let Some(tree_hash) = get_head_tree()? {
+            read_tree_recursive(&tree_hash, Path::new(""), &mut head_files)?;
+        }
+        base_hash = head_files.get(file).cloned();
+    }
+    
+    let base_content = if let Some(hash) = base_hash {
+        let (obj_type, content) = read_object(&hash)?;
+        if obj_type == "blob" {
+            String::from_utf8_lossy(&content).to_string()
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+    
+    let path = Path::new(file);
+    let new_content = if path.exists() && path.is_file() {
+        fs::read_to_string(path).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    
+    if base_content == new_content {
+        return Ok(());
+    }
+    
+    let diff_result = similar::TextDiff::from_lines(&base_content, &new_content);
+    for change in diff_result.iter_all_changes() {
+        let sign = match change.tag() {
+            similar::ChangeTag::Delete => "-",
+            similar::ChangeTag::Insert => "+",
+            similar::ChangeTag::Equal => " ",
+        };
+        print!("{}{}", sign, change);
+    }
+    
+    Ok(())
+}
+
+fn get_commit_parent(hash: &str) -> Result<Option<String>> {
+    let (obj_type, content) = read_object(hash)?;
+    if obj_type == "commit" {
+        let content_str = String::from_utf8_lossy(&content);
+        for line in content_str.lines() {
+            if let Some(p) = line.strip_prefix("parent ") {
+                return Ok(Some(p.to_string()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn is_ancestor(ancestor: &str, target: &str) -> Result<bool> {
+    let mut current = Some(target.to_string());
+    while let Some(hash) = current {
+        if hash == ancestor {
+            return Ok(true);
+        }
+        current = get_commit_parent(&hash)?;
+    }
+    Ok(false)
+}
+
+fn merge(branch: &str) -> Result<()> {
+    let head_hash = get_head()?.context("No HEAD commit")?;
+    let target_hash = resolve_revision(branch)?;
+    
+    if head_hash == target_hash {
+        println!("Already up to date.");
+        return Ok(());
+    }
+    
+    if is_ancestor(&head_hash, &target_hash)? {
+        println!("Updating {}..{}", &head_hash[0..7], &target_hash[0..7]);
+        println!("Fast-forward");
+        
+        let (obj_type, content) = read_object(&target_hash)?;
+        if obj_type != "commit" { return Err(anyhow!("Merge target is not a commit")); }
+        
+        let content_str = String::from_utf8_lossy(&content);
+        let mut tree_hash = String::new();
+        for line in content_str.lines() {
+            if let Some(t) = line.strip_prefix("tree ") {
+                tree_hash = t.to_string();
+                break;
+            }
+        }
+        
+        restore_tree(&tree_hash, Path::new("."))?;
+        
+        let dir = git4_dir()?;
+        let head_path = dir.join("HEAD");
+        let head_content = fs::read_to_string(&head_path)?;
+        let head_content = head_content.trim();
+        
+        if head_content.starts_with("ref: ") {
+            let ref_path = head_content.strip_prefix("ref: ").unwrap().trim();
+            let full_ref_path = dir.join(ref_path);
+            fs::write(full_ref_path, format!("{}\n", target_hash))?;
+        } else {
+            fs::write(head_path, format!("{}\n", target_hash))?;
+        }
+    } else {
+        println!("Merge strategy not implemented for non-fast-forward. Aborting.");
     }
     
     Ok(())

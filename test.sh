@@ -85,6 +85,21 @@ $GIT4 add feature.txt
 echo "=> 加入 feature.txt 後，檢視 status..."
 $GIT4 status
 
+# 9. 測試 diff 與 merge
+echo "=> [9/9] 測試 diff 與 merge 功能..."
+$GIT4 checkout main
+$GIT4 branch feat-merge
+$GIT4 checkout feat-merge
+echo "A totally new line to test diff" >> feature.txt
+echo "=> 檢視 diff 輸出..."
+$GIT4 diff feature.txt
+$GIT4 add feature.txt
+$GIT4 commit -m "Add new line to feature.txt"
+echo "=> 切換回 main 並進行 fast-forward 合併..."
+$GIT4 checkout main
+$GIT4 merge feat-merge
+$GIT4 log
+
 # 結束與清理
 echo "=================================="
 echo "    所有測試皆順利完成！🎉     "
