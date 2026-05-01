@@ -73,6 +73,20 @@ enum Commands {
     Merge {
         branch: String,
     },
+    /// Clone a repository into a new directory
+    Clone {
+        source: String,
+        dest: String,
+    },
+    /// Push branches and objects to a local remote path
+    Push {
+        remote_path: String,
+        branch: String,
+    },
+    /// Fetch branches and objects from a local remote path
+    Fetch {
+        remote_path: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -125,6 +139,15 @@ fn main() -> Result<()> {
         }
         Commands::Merge { branch } => {
             merge(&branch)?;
+        }
+        Commands::Clone { source, dest } => {
+            clone(&source, &dest)?;
+        }
+        Commands::Push { remote_path, branch } => {
+            push(&remote_path, &branch)?;
+        }
+        Commands::Fetch { remote_path } => {
+            fetch(&remote_path)?;
         }
     }
 
@@ -837,5 +860,104 @@ fn merge(branch: &str) -> Result<()> {
         println!("Merge strategy not implemented for non-fast-forward. Aborting.");
     }
     
+    Ok(())
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let path = entry.path();
+        let target = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&path, &target)?;
+        } else {
+            // override existing files
+            fs::copy(&path, &target)?;
+        }
+    }
+    Ok(())
+}
+
+fn clone(source: &str, dest: &str) -> Result<()> {
+    let src_path = Path::new(source);
+    let dest_path = Path::new(dest);
+    
+    if !src_path.join(".git4").exists() {
+        return Err(anyhow!("Source is not a git4 repository"));
+    }
+    if dest_path.exists() {
+        return Err(anyhow!("Destination already exists"));
+    }
+    
+    fs::create_dir_all(dest_path)?;
+    copy_dir_recursive(&src_path.join(".git4"), &dest_path.join(".git4"))?;
+    
+    let current_dir = std::env::current_dir()?;
+    std::env::set_current_dir(dest_path)?;
+    
+    let head_content = fs::read_to_string(".git4/HEAD")?;
+    let head_content = head_content.trim();
+    if head_content.starts_with("ref: refs/heads/") {
+        let branch = head_content.strip_prefix("ref: refs/heads/").unwrap();
+        let _ = checkout(branch);
+    } else {
+        let _ = checkout(head_content);
+    }
+    
+    std::env::set_current_dir(current_dir)?;
+    println!("Cloned into '{}'", dest);
+    
+    Ok(())
+}
+
+fn push(remote_path: &str, branch: &str) -> Result<()> {
+    let local_dir = git4_dir()?;
+    let remote_dir = Path::new(remote_path).join(".git4");
+    
+    if !remote_dir.exists() {
+        return Err(anyhow!("Remote path is not a git4 repository"));
+    }
+    
+    let local_branch_path = local_dir.join("refs/heads").join(branch);
+    if !local_branch_path.exists() {
+        return Err(anyhow!("Local branch {} does not exist", branch));
+    }
+    let local_hash = fs::read_to_string(&local_branch_path)?;
+    let local_hash = local_hash.trim();
+    
+    copy_dir_recursive(&local_dir.join("objects"), &remote_dir.join("objects"))?;
+    
+    let remote_branch_path = remote_dir.join("refs/heads").join(branch);
+    fs::create_dir_all(remote_branch_path.parent().unwrap())?;
+    fs::write(remote_branch_path, format!("{}\n", local_hash))?;
+    
+    println!("Pushed branch {} to {}", branch, remote_path);
+    Ok(())
+}
+
+fn fetch(remote_path: &str) -> Result<()> {
+    let local_dir = git4_dir()?;
+    let remote_dir = Path::new(remote_path).join(".git4");
+    
+    if !remote_dir.exists() {
+        return Err(anyhow!("Remote path is not a git4 repository"));
+    }
+    
+    copy_dir_recursive(&remote_dir.join("objects"), &local_dir.join("objects"))?;
+    
+    let remote_heads = remote_dir.join("refs/heads");
+    if remote_heads.exists() {
+        let local_remotes = local_dir.join("refs/remotes").join("origin");
+        fs::create_dir_all(&local_remotes)?;
+        for entry in fs::read_dir(remote_heads)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            fs::copy(entry.path(), local_remotes.join(name))?;
+        }
+    }
+    
+    println!("Fetched from {}", remote_path);
     Ok(())
 }

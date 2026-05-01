@@ -100,9 +100,26 @@ $GIT4 checkout main
 $GIT4 merge feat-merge
 $GIT4 log
 
+# 10. 測試遠端聯網：clone, push, fetch
+echo "=> [10/10] 測試 clone, push, fetch 跨倉儲操作..."
+cd ..
+./target/debug/git4 clone test_repo remote_repo
+cd remote_repo
+echo "New remote data" > remote.txt
+../target/debug/git4 add remote.txt
+../target/debug/git4 commit -m "Commit on remote repo"
+echo "=> 推送回 local test_repo..."
+../target/debug/git4 push ../test_repo main
+cd ../test_repo
+echo "=> 檢查原廠 test_repo 是否成功收到 push..."
+$GIT4 log
+
+echo "=> 在 test_repo 測試從 remote_repo 拉取 fetch..."
+$GIT4 fetch ../remote_repo
+
 # 結束與清理
 echo "=================================="
 echo "    所有測試皆順利完成！🎉     "
 echo "=================================="
 cd ..
-rm -rf test_repo
+rm -rf test_repo remote_repo
